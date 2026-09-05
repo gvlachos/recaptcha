@@ -1,0 +1,127 @@
+/**
+ * styles.css
+ * ---------------------------------------------------------------
+ * Minimal styling for the reference page. Nothing in here is
+ * reCAPTCHA-specific except the explicit absence of a rule hiding
+ * `.grecaptcha-badge` — see the "REQUIRED: reCAPTCHA BADGE" comment
+ * in index.html before adding one.
+ * ---------------------------------------------------------------
+ */
+
+:root {
+  --color-text: #1a1a1a;
+  --color-muted: #5f6368;
+  --color-border: #d5d8dc;
+  --color-accent: #1a73e8;
+  --color-error: #c5221f;
+  --color-error-bg: #fce8e6;
+  --color-info-bg: #e8f0fe;
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--color-text);
+  background: #fafafa;
+}
+
+.page {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 0 24px;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin-bottom: 8px;
+}
+
+.page__intro {
+  color: var(--color-muted);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin-bottom: 32px;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+textarea {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+
+textarea:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+button {
+  align-self: flex-start;
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--color-accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.status {
+  min-height: 1.2em;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+}
+
+.status:empty {
+  padding: 0;
+}
+
+.status--info {
+  background: var(--color-info-bg);
+  color: var(--color-text);
+}
+
+.status--error {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.disclosure {
+  margin-top: 32px;
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.disclosure a {
+  color: var(--color-muted);
+}
+
+/*
+ * Intentionally NO rule here that hides .grecaptcha-badge.
+ * If you ever add one, you are required to replace it with a
+ * visible disclosure notice — see index.html.
+ */

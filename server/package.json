@@ -1,0 +1,20 @@
+{
+  "name": "recaptcha-verification-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference Node.js backend for verifying reCAPTCHA (Sept 2026 / Fraud Defense Premium) tokens via the official @google-cloud/recaptcha-enterprise client library.",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@google-cloud/recaptcha-enterprise": "^5.5.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

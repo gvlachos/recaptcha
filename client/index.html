@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>reCAPTCHA (Sept 2026) — Frontend Reference Implementation</title>
+  <link rel="stylesheet" href="css/styles.css" />
+
+  <!--
+    ================================================================
+    NOTE ON WHAT IS *DELIBERATELY NOT* HERE
+    ================================================================
+    You will NOT find a Google reCAPTCHA <script> tag anywhere in
+    this <head>. That is intentional, not an oversight.
+
+    The Google loader script (either
+    https://www.google.com/recaptcha/enterprise.js?render=SITE_KEY
+    or the legacy .../api.js?render=SITE_KEY) is instead injected
+    dynamically, at runtime, by the loadRecaptchaScript() function
+    in js/recaptcha.js — called from js/app.js.
+
+    See the top-of-file comment in js/recaptcha.js for the full
+    reasoning (per-environment site keys, avoiding unnecessary
+    loads on pages that don't need it, timeout/error handling a
+    bare <script> tag cannot provide, and a single place to switch
+    loader files). Read that comment before "simplifying" this back
+    to a static <head> tag.
+    ================================================================
+  -->
+</head>
+<body>
+
+  <main class="page">
+    <h1>reCAPTCHA (Sept 2026) — Frontend Reference Implementation</h1>
+
+    <p class="page__intro">
+      This form demonstrates the reference integration pattern: a score-based
+      reCAPTCHA token is generated on submit and sent to a backend endpoint
+      for verification (see the companion <code>recaptcha-backend</code>
+      reference project's <code>src/routes/verify.js</code>). The frontend
+      never decides pass/fail itself — that decision always happens on the
+      backend, where it cannot be bypassed by disabling or editing this
+      page's JavaScript.
+    </p>
+
+    <form id="demo-form" novalidate>
+      <label for="message">Message</label>
+      <textarea id="message" name="message" rows="4" required
+        placeholder="Anything — this demo just echoes it back on success."></textarea>
+
+      <button type="submit" id="submit-button">Submit</button>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </form>
+
+    <!--
+      ============================================================
+      REQUIRED: reCAPTCHA BADGE / DISCLOSURE NOTICE
+      ============================================================
+      Google's terms of service require EITHER:
+        (a) displaying the default reCAPTCHA badge Google injects
+            automatically in the bottom-right corner of the page
+            once the script loads (do not hide it with CSS), OR
+        (b) if you deliberately hide that badge (e.g.
+            .grecaptcha-badge { visibility: hidden; }), you MUST
+            instead display your own visible notice, in the user's
+            language, along the lines of the text below, near any
+            actions protected by reCAPTCHA.
+
+      This reference project keeps the default badge visible (see
+      css/styles.css — there is no rule hiding .grecaptcha-badge)
+      and additionally shows the notice below for clarity. If your
+      app hides the badge, keep this notice and do not remove it.
+
+      Official requirement:
+      https://developers.google.com/recaptcha/docs/faq#id-like-to-hide-the-recaptcha-badge-what-is-allowed
+      ============================================================
+    -->
+    <p class="disclosure">
+      This site is protected by reCAPTCHA and the Google
+      <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+      and
+      <a href="https://policies.google.com/terms" target="_blank" rel="noopener">Terms of Service</a>
+      apply.
+    </p>
+  </main>
+
+  <!--
+    ================================================================
+    SCRIPT LOAD ORDER MATTERS
+    ================================================================
+    1. config.js    — defines window.RECAPTCHA_CONFIG. Must load
+                       first; every other script below reads it.
+    2. recaptcha.js — defines window.RecaptchaClient
+                       (loadRecaptchaScript / executeRecaptcha).
+                       Does NOT itself fetch the Google script yet —
+                       that only happens when one of those functions
+                       is actually called (see app.js).
+    3. app.js       — application-specific wiring: attaches the
+                       form submit handler and is the first thing
+                       that actually triggers loadRecaptchaScript().
+
+    None of these three files are the Google-hosted script itself —
+    that one is injected dynamically by recaptcha.js at runtime, not
+    listed here. See the note at the top of <head> and the
+    top-of-file comment in js/recaptcha.js.
+    ================================================================
+  -->
+  <script src="js/config.js"></script>
+  <script src="js/recaptcha.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

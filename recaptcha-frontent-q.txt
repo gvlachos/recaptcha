@@ -1,0 +1,15 @@
+Let's validate the JavaScript syntax and do a quick sanity check before delivering.All files are syntactically valid. Let's also do a quick functional smoke test in a headless DOM to make sure `loadRecaptchaScript` correctly rejects the placeholder site key and that `RecaptchaClient` wires up as expected.Now let's verify it works correctly once a real-looking site key is set (confirming script injection logic and idempotency), by intercepting `document.createElement`.Everything works as designed: script injection, `ready`/`execute` wiring, correct URL construction with the configured site key, and idempotent reuse across multiple `execute()` calls. Let's clean up the test artifacts before packaging.Now copy to outputs and present the files.The frontend reference project is complete and tested:
+
+**Key design point:** `index.html`'s `<head>` contains no Google script tag at all — instead, `js/recaptcha.js` exposes `loadRecaptchaScript()`, which dynamically injects the loader `<script>` element at runtime. The `<head>` and the top of `recaptcha.js` both carry a documented explanation of why (per-environment site keys, avoiding unnecessary loads, timeout/error handling a static tag can't give you).
+
+**Files:**
+- `js/config.js` — the single source of truth for `siteKey`, `loaderScript` (enterprise.js vs. legacy api.js), `verifyEndpoint`, timeout, and debug flag — with inline docs on how your build pipeline should inject real per-environment values in place of the `__RECAPTCHA_SITE_KEY__` placeholder
+- `js/recaptcha.js` — `loadRecaptchaScript()` (idempotent, timeout-guarded, CSP-aware error messages) and `executeRecaptcha(action)` (returns a token, wraps `grecaptcha.enterprise.ready/execute`)
+- `js/app.js` — example form-submit flow: gets a token, POSTs it + form data to the backend, reacts only to the backend's verdict (never checks the score client-side)
+- `index.html` — minimal semantic markup, correct script load order, plus the required reCAPTCHA badge/disclosure notice
+- `css/styles.css` — light styling, with an explicit comment warning against hiding the badge without adding the disclosure
+- `README.md` — config table, end-to-end flow explanation, CSP requirements, and how to extend this to multiple forms/actions
+
+**Verified this session:** all three JS files pass `node --check`; a headless-DOM smoke test confirmed the placeholder site key is correctly rejected with a clear error, and — after simulating a real key and a successful script load — confirmed `executeRecaptcha()` builds the correct Google URL, resolves with a token, and correctly reuses the already-loaded script on a second call from a different action.
+
+This pairs directly with the `recaptcha-backend` project from earlier: the token from `executeRecaptcha()` here is exactly what `verifyRecaptchaToken()` there expects.
