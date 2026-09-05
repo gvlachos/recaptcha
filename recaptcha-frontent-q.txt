@@ -13,3 +13,26 @@ Let's validate the JavaScript syntax and do a quick sanity check before deliveri
 **Verified this session:** all three JS files pass `node --check`; a headless-DOM smoke test confirmed the placeholder site key is correctly rejected with a clear error, and — after simulating a real key and a successful script load — confirmed `executeRecaptcha()` builds the correct Google URL, resolves with a token, and correctly reuses the already-loaded script on a second call from a different action.
 
 This pairs directly with the `recaptcha-backend` project from earlier: the token from `executeRecaptcha()` here is exactly what `verifyRecaptchaToken()` there expects.
+
+-----------------
+
+update the frontend code to simulate calling the backend from different applications
+
+-----------------
+
+I'll extend the reference project so `app.js` can simulate the shared backend being called from several different frontend applications — each with its own site key and `appId` — which directly exercises the backend's per-app site-key validation. This requires `recaptcha.js` to support loading more than one site key on the same page (Google supports this), not just a cosmetic dropdown.Now I'll rewrite `recaptcha.js` to support loading and executing against multiple site keys on the same page (Google supports this via multiple `render=` script tags), while keeping the single-site-key case unchanged by default.Now let's update `config.js` to add the demo multi-app registry, clearly separated from real single-app config:Now update `app.js` to build the app-selector UI and route the appropriate `appId`/`siteKey` pair through `executeRecaptcha` and the backend payload:Now update `index.html` to add the (initially hidden) app-selector control, with documentation:Add matching styles for the new selector control:Now let's syntax-check and functionally test the updated files, including the new multi-key logic.Now let's functionally test that `recaptcha.js` correctly loads and tracks two different site keys independently.Exactly as designed: three distinct script tags for three distinct site keys, correct per-key token generation, and correct de-duplication on repeat calls for the same key. Now let's verify the placeholder-rejection still works per-key too:Correct. Now clean up test artifacts and update the README to document the new simulation feature.Now let's do a final visual check of the HTML structure and copy everything to outputs.Here's what changed to simulate multiple applications calling the shared backend:
+
+**`js/recaptcha.js`** — extended from a single implicit site key to genuinely supporting multiple site keys on one page (which Google's reCAPTCHA actually allows — one `<script render=KEY>` tag per key). `loadRecaptchaScript()` and `executeRecaptcha()` now track a `Map` of load-promises keyed by site key instead of one global promise, so each key is only ever fetched once, independently.
+
+**`js/config.js`** — added a clearly-marked `SIMULATED_APPS` array (demo/test-harness only, empty array = normal single-app behavior) listing fake applications, each with its own `id`, `label`, and `siteKey` placeholder.
+
+**`js/app.js`** — builds a "Simulate submission from application" dropdown from that list, and on submit passes the selected app's `siteKey` into `executeRecaptcha()` and its `appId` into the JSON payload sent to the backend — directly exercising the backend's `SITE_KEY_MISMATCH` validation from the earlier `recaptcha-backend` project.
+
+**`index.html` / `css/styles.css`** — added the (JS-populated, hidden-until-needed) selector control and matching styles.
+
+**Verified this session:**
+- Three distinct site keys → three distinct `<script>` tags injected, each executed correctly and only loaded once (confirmed via a headless-DOM test tracking injected URLs).
+- Repeat calls for an already-loaded key correctly reuse the cached promise instead of re-injecting.
+- Placeholder site keys in `SIMULATED_APPS` are still correctly rejected with a clear error, per-key.
+
+README updated with a new "Simulating multiple frontend applications against one backend" section explaining the mechanism and how to strip it back out for a real single-app deployment.

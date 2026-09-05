@@ -43,6 +43,30 @@
       page's JavaScript.
     </p>
 
+    <!--
+      ============================================================
+      MULTI-APPLICATION SIMULATION CONTROL (demo/test-harness only)
+      ============================================================
+      This dropdown lets you manually exercise the "one shared
+      backend, several frontend applications" scenario described in
+      the migration guide (Section 6.2) and the companion
+      recaptcha-backend project. It is populated at runtime by
+      js/app.js from js/config.js's `SIMULATED_APPS` list — there is
+      nothing to edit here in the HTML.
+
+      `hidden` by default so there is no flash of an empty/unstyled
+      control before JavaScript runs; app.js removes `hidden` only
+      if `SIMULATED_APPS` is non-empty. A real, single-application
+      production copy of this page can simply delete this whole
+      <div>, or leave `SIMULATED_APPS` empty in config.js so it
+      never appears.
+      ============================================================
+    -->
+    <div id="app-selector-wrapper" class="app-selector" hidden>
+      <label for="app-selector">Simulate submission from application</label>
+      <select id="app-selector"></select>
+    </div>
+
     <form id="demo-form" novalidate>
       <label for="message">Message</label>
       <textarea id="message" name="message" rows="4" required

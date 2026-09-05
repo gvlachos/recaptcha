@@ -1,11 +1,10 @@
 /**
  * recaptcha.js
  * ---------------------------------------------------------------
- * Loads Google's reCAPTCHA script and exposes a single
- * `executeRecaptcha(action)` function that resolves with a token,
- * mirroring what `ReCaptchaV3Service.execute()` does in the
- * Angular `ng-recaptcha-2` integration, for teams/pages that are
- * not using Angular.
+ * Loads Google's reCAPTCHA script and exposes a small API for
+ * generating tokens, mirroring what `ReCaptchaV3Service.execute()`
+ * does in the Angular `ng-recaptcha-2` integration, for teams/pages
+ * that are not using Angular.
  *
  * *** WHY THE SCRIPT IS LOADED FROM A JS FUNCTION, NOT <head> ***
  * A classic v3 integration typically hardcodes something like this
@@ -39,6 +38,24 @@
  *   4. It gives one place (this file) to switch the loader URL
  *      between `enterprise.js` and `api.js` (see config.js
  *      `loaderScript`), instead of hunting through HTML templates.
+ *
+ * *** MULTIPLE SITE KEYS ON ONE PAGE ***
+ * A normal production frontend only ever uses ONE site key (its own
+ * environment-specific key from config.js). However, this reference
+ * project's `app.js` demo additionally simulates several DIFFERENT
+ * frontend applications sharing one backend, each with its own site
+ * key — this is what actually exercises the backend's per-app
+ * site-key validation (see recaptcha-backend's
+ * `SITE_KEY_MISMATCH` check).
+ *
+ * Google supports this: you can load more than one site key on the
+ * same page by injecting one <script src="...?render=KEY"> tag per
+ * key. Each script registers its key with the shared
+ * `grecaptcha.enterprise` global; after each has loaded, you call
+ * `execute(thatKey, { action })` for whichever key you need. Every
+ * function below therefore accepts an OPTIONAL `siteKey` parameter
+ * that defaults to `config.siteKey` — a normal single-key frontend
+ * never needs to pass it and can ignore this entirely.
  * ---------------------------------------------------------------
  */
 
@@ -60,63 +77,69 @@
     }
   }
 
-  // Tracks the in-flight/completed script-loading promise so that
-  // calling loadRecaptchaScript() multiple times (e.g. from
-  // several independent forms on the same page) only ever injects
-  // the <script> tag once and everyone awaits the same load.
-  let scriptLoadPromise = null;
+  // Tracks one in-flight/completed script-loading promise PER SITE
+  // KEY, keyed by the site key string, so that:
+  //   - calling loadRecaptchaScript() multiple times for the SAME
+  //     key (e.g. from several independent forms on the same page)
+  //     only ever injects that key's <script> tag once, and
+  //   - calling it for a DIFFERENT key (the multi-app simulation in
+  //     app.js) loads an additional script tag for that key,
+  //     without re-loading or interfering with keys already loaded.
+  const scriptLoadPromisesByKey = new Map();
+
+  function isPlaceholder(siteKey) {
+    return !siteKey || siteKey.startsWith('__');
+  }
 
   /**
-   * Dynamically injects Google's reCAPTCHA loader script into the
-   * page and resolves once it has finished loading.
+   * Dynamically injects Google's reCAPTCHA loader script for the
+   * given site key and resolves once it has finished loading.
    *
-   * Safe to call multiple times — subsequent calls return the same
-   * in-flight/settled promise rather than injecting duplicate
-   * <script> tags.
+   * Safe to call multiple times, including concurrently and with
+   * different site keys — each distinct key is only ever injected
+   * once (see the Map comment above).
    *
+   * @param {string} [siteKey]
+   *   Defaults to `config.siteKey`. Only pass this explicitly if
+   *   you are intentionally working with more than one site key on
+   *   the same page (see the "MULTIPLE SITE KEYS" note at the top
+   *   of this file, and app.js for the multi-application
+   *   simulation that uses this).
    * @returns {Promise<void>}
    */
-  function loadRecaptchaScript() {
-    if (scriptLoadPromise) {
-      log('Script already loading/loaded — reusing existing promise.');
-      return scriptLoadPromise;
+  function loadRecaptchaScript(siteKey) {
+    const key = siteKey || config.siteKey;
+
+    if (isPlaceholder(key)) {
+      // Catches the common mistake of forgetting to replace a
+      // "__RECAPTCHA_SITE_KEY__"-style placeholder from config.js
+      // via the build pipeline — fails loudly and immediately
+      // rather than silently sending a bad request to Google.
+      return Promise.reject(
+        new Error(
+          `[recaptcha.js] Site key "${key}" is missing or still a placeholder value. ` +
+            'Check that your build pipeline is injecting a real site key into ' +
+            'js/config.js for this environment (see the comments in that file).'
+        )
+      );
     }
 
-    scriptLoadPromise = new Promise((resolve, reject) => {
-      // Guard against a page that, for some other reason, already
-      // has grecaptcha available (e.g. a second copy of this
-      // module loaded accidentally) — avoid injecting a duplicate
-      // script in that case too.
-      if (window.grecaptcha) {
-        log('window.grecaptcha already present — skipping script injection.');
-        resolve();
-        return;
-      }
+    const existing = scriptLoadPromisesByKey.get(key);
+    if (existing) {
+      log(`Script for site key "${key}" already loading/loaded — reusing existing promise.`);
+      return existing;
+    }
 
-      if (!config.siteKey || config.siteKey.startsWith('__')) {
-        // Catches the common mistake of forgetting to replace the
-        // "__RECAPTCHA_SITE_KEY__" placeholder from config.js via
-        // the build pipeline — fails loudly and immediately rather
-        // than silently sending a bad request to Google.
-        reject(
-          new Error(
-            '[recaptcha.js] config.siteKey is missing or still set to its placeholder ' +
-              'value. Check that your build pipeline is injecting a real site key into ' +
-              'js/config.js for this environment (see the comments in that file).'
-          )
-        );
-        return;
-      }
-
+    const promise = new Promise((resolve, reject) => {
       // config.loaderScript switches between the current
       // 'enterprise.js' loader (default, used by migrated keys)
-      // and the legacy 'api.js' loader (only needed if this
-      // frontend is still pointed at an un-migrated classic v3
-      // key) — see config.js for the full explanation.
+      // and the legacy 'api.js' loader (only needed if a key is
+      // still un-migrated classic v3) — see config.js for the full
+      // explanation. All keys loaded on one page are assumed to use
+      // the same loader type; mixing loader types on one page is
+      // not a supported/tested configuration.
       const loaderFile = config.loaderScript === 'api.js' ? 'api.js' : 'enterprise.js';
-      const scriptUrl = `https://www.google.com/recaptcha/${loaderFile}?render=${encodeURIComponent(
-        config.siteKey
-      )}`;
+      const scriptUrl = `https://www.google.com/recaptcha/${loaderFile}?render=${encodeURIComponent(key)}`;
 
       const script = document.createElement('script');
       script.src = scriptUrl;
@@ -132,8 +155,8 @@
         reject(
           new Error(
             `[recaptcha.js] Timed out after ${config.scriptLoadTimeoutMs}ms waiting for the ` +
-              'reCAPTCHA script to load. Check network connectivity and that ' +
-              'https://www.google.com is reachable from this browser/network.'
+              `reCAPTCHA script for site key "${key}" to load. Check network connectivity and ` +
+              'that https://www.google.com is reachable from this browser/network.'
           )
         );
       }, config.scriptLoadTimeoutMs);
@@ -148,19 +171,20 @@
         window.clearTimeout(timeoutId);
         reject(
           new Error(
-            `[recaptcha.js] Failed to load the reCAPTCHA script from ${scriptUrl}. ` +
-              'Check network connectivity, any Content-Security-Policy restrictions ' +
-              '(script-src / connect-src must allow https://www.google.com and ' +
-              'https://www.gstatic.com), and that the site key is valid for this domain.'
+            `[recaptcha.js] Failed to load the reCAPTCHA script for site key "${key}" from ` +
+              `${scriptUrl}. Check network connectivity, any Content-Security-Policy ` +
+              'restrictions (script-src / connect-src must allow https://www.google.com and ' +
+              'https://www.gstatic.com), and that this site key is valid for this domain.'
           )
         );
       };
 
       document.head.appendChild(script);
-      log(`Injecting script tag: ${scriptUrl}`);
+      log(`Injecting script tag for site key "${key}": ${scriptUrl}`);
     });
 
-    return scriptLoadPromise;
+    scriptLoadPromisesByKey.set(key, promise);
+    return promise;
   }
 
   /**
@@ -171,11 +195,11 @@
    * that consumes this token).
    *
    * Automatically loads the Google script first if it has not been
-   * loaded yet — you do not need to call loadRecaptchaScript()
-   * yourself before this, though you may want to (see app.js) to
-   * "warm up" the script ahead of time, e.g. as soon as a form
-   * comes into view, so the eventual submit click does not have to
-   * wait for the network fetch.
+   * loaded yet for the relevant site key — you do not need to call
+   * loadRecaptchaScript() yourself before this, though you may want
+   * to (see app.js) to "warm up" the script ahead of time, e.g. as
+   * soon as a form comes into view, so the eventual submit click
+   * does not have to wait for the network fetch.
    *
    * @param {string} action
    *   A short, stable name describing what the user is doing (e.g.
@@ -188,14 +212,23 @@
    *   value for the whole app; see:
    *   https://docs.cloud.google.com/recaptcha/docs/actions-website
    *
+   * @param {string} [siteKey]
+   *   Defaults to `config.siteKey`. A normal single-application
+   *   frontend never passes this. Only used by the multi-application
+   *   simulation in app.js, to generate a token against a
+   *   *different* application's site key on demand — see the
+   *   "MULTIPLE SITE KEYS" note at the top of this file.
+   *
    * @returns {Promise<string>} Resolves with the reCAPTCHA token.
    */
-  async function executeRecaptcha(action) {
+  async function executeRecaptcha(action, siteKey) {
     if (!action || typeof action !== 'string') {
-      throw new TypeError('executeRecaptcha(action) requires a non-empty action string.');
+      throw new TypeError('executeRecaptcha(action, siteKey?) requires a non-empty action string.');
     }
 
-    await loadRecaptchaScript();
+    const key = siteKey || config.siteKey;
+
+    await loadRecaptchaScript(key);
 
     const engine = config.loaderScript === 'api.js' ? window.grecaptcha : window.grecaptcha.enterprise;
 
@@ -211,23 +244,28 @@
     return new Promise((resolve, reject) => {
       // `.ready()` waits until the script has fully initialized
       // (it may still be doing internal setup work briefly after
-      // `onload` fires) before it's safe to call `.execute()`.
+      // `onload` fires) before it's safe to call `.execute()`. When
+      // multiple site keys are loaded on the page, `.ready()` is
+      // shared/global — by the time we reach this point,
+      // `await loadRecaptchaScript(key)` above has already
+      // guaranteed THIS key's script specifically has loaded.
       engine.ready(() => {
         const startedAt = window.performance ? window.performance.now() : Date.now();
 
         engine
-          .execute(config.siteKey, { action })
+          .execute(key, { action })
           .then((token) => {
             if (config.debug) {
               const elapsed = (window.performance ? window.performance.now() : Date.now()) - startedAt;
-              log(`execute("${action}") resolved in ${elapsed.toFixed(0)}ms`);
+              log(`execute("${action}") for site key "${key}" resolved in ${elapsed.toFixed(0)}ms`);
             }
             resolve(token);
           })
           .catch((err) => {
             reject(
               new Error(
-                `[recaptcha.js] grecaptcha execute("${action}") failed: ${err && err.message ? err.message : err}`
+                `[recaptcha.js] grecaptcha execute("${action}") for site key "${key}" failed: ` +
+                  `${err && err.message ? err.message : err}`
               )
             );
           });

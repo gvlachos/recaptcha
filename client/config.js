@@ -102,4 +102,47 @@ window.RECAPTCHA_CONFIG = {
   // end users via devtools.
   // ---------------------------------------------------------
   debug: false,
+
+  // ===========================================================
+  // SIMULATED_APPS — DEMO / TEST-HARNESS CONFIGURATION ONLY.
+  // ===========================================================
+  // A real, single-purpose production frontend does NOT need this
+  // section at all — it only ever uses the one `siteKey` above.
+  //
+  // This list exists so `index.html` / `app.js` in this reference
+  // project can demonstrate — and let you manually test — the
+  // scenario described in the migration guide, Section 6.2 and
+  // recaptcha-backend/.env.example section 3: ONE shared backend
+  // instance verifying tokens on behalf of SEVERAL different
+  // frontend applications, each with its own site key and `appId`.
+  //
+  // Each entry below stands in for one of your 15 real Angular
+  // applications for demo purposes:
+  //   - `id`      must exactly match one of the
+  //               `RECAPTCHA_SITE_KEY_<APPID>` suffixes configured
+  //               on the backend (see recaptcha-backend/.env.example
+  //               section 3) — this is the `appId` sent to the
+  //               backend with each request.
+  //   - `label`   a human-readable name shown in this demo page's
+  //               UI only; has no effect on the actual API calls.
+  //   - `siteKey` the REAL site key registered for that simulated
+  //               application. Replace each placeholder the same
+  //               way you would replace `siteKey` above. If you
+  //               only have one real test site key available, it
+  //               is fine to reuse it across multiple entries here
+  //               purely to exercise the UI flow — just be aware
+  //               the backend's per-app SITE_KEY_MISMATCH check
+  //               will not have anything to actually mismatch
+  //               against in that case.
+  //
+  // To use this project as a real single-application frontend
+  // instead of a multi-app test harness, either delete this array
+  // or simply leave it empty — `app.js` falls back to using the
+  // single `siteKey` above whenever `SIMULATED_APPS` is empty.
+  // ===========================================================
+  SIMULATED_APPS: [
+    { id: 'APP01', label: 'App 01 — Storefront (EU)', siteKey: '__RECAPTCHA_SITE_KEY_APP01__' },
+    { id: 'APP02', label: 'App 02 — Storefront (US)', siteKey: '__RECAPTCHA_SITE_KEY_APP02__' },
+    { id: 'APP03', label: 'App 03 — Partner Portal', siteKey: '__RECAPTCHA_SITE_KEY_APP03__' },
+  ],
 };

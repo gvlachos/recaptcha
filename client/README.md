@@ -80,6 +80,46 @@ production.
    page's JavaScript.
 6. The UI reacts only to the backend's HTTP response.
 
+## Simulating multiple frontend applications against one backend
+
+The migration guide (Section 6.2) and the companion `recaptcha-backend`
+project both describe a common shape: **one shared backend service verifying
+tokens on behalf of several different frontend applications**, each with its
+own site key and `appId`. This reference project includes a small,
+self-contained simulation of exactly that scenario, so you can manually test
+the backend's per-app validation without standing up 15 real frontends.
+
+**How it works:**
+
+- `js/config.js`'s `SIMULATED_APPS` array lists a few fake applications, each
+  with an `id` (matching a `RECAPTCHA_SITE_KEY_<APPID>` on the backend), a
+  display `label`, and its own `siteKey`.
+- When that array is non-empty, `index.html` shows a "Simulate submission
+  from application" dropdown (hidden otherwise) that `js/app.js` populates at
+  runtime.
+- Selecting a different application and submitting the form calls
+  `executeRecaptcha(action, thatApp.siteKey)` — an explicit second argument
+  that tells `recaptcha.js` to load and execute against a *different* site
+  key than the page's default one, and includes that application's `appId`
+  in the JSON payload sent to the backend.
+- `recaptcha.js` supports this because Google allows loading more than one
+  site key on the same page (one `<script src="...?render=KEY">` per key);
+  see the "MULTIPLE SITE KEYS ON ONE PAGE" comment at the top of that file.
+  Each key's script is only fetched the first time it's actually needed —
+  switching the dropdown does not eagerly load every simulated app's script
+  up front.
+- If you deliberately configure two `SIMULATED_APPS` entries with genuinely
+  different real site keys, you can use this to positively verify the
+  backend's `SITE_KEY_MISMATCH` check: the backend should reject a token
+  minted with App 01's key if the request claims `appId: "APP02"`.
+
+**This is a demo/test-harness feature, not something a real single-purpose
+production frontend needs.** To turn this reference project into a normal
+single-application frontend, either delete the `SIMULATED_APPS` array in
+`config.js` or leave it empty (`[]`) — the dropdown disappears automatically
+and `app.js` falls back to the plain single-site-key flow (no `appId` sent),
+exactly as described in the rest of this README.
+
 ## Adapting this for a real, multi-form application
 
 - **Copy the `ACTION_NAME` constant and `handleFormSubmit` pattern from
