@@ -1,12 +1,15 @@
 ---
 title: "Migrating from reCAPTCHA v3 to reCAPTCHA (Sept 2026)"
 subtitle: "Benefits, Challenges, and Implementation Plan for Angular / Node.js Applications"
+author: "Engineering Team"
 date: "September 2026"
 ---
 
 # Migrating from reCAPTCHA v3 to reCAPTCHA (Sept 2026)
 
 **A guide for developers and engineering managers**
+
+*Prepared: September 2026*
 
 > **A note on naming.** In April 2026, Google restructured its bot/fraud-protection product into **Google Cloud Fraud Defense**, of which reCAPTCHA is now a part. What used to be a hard split between "reCAPTCHA Classic v3" (free) and "reCAPTCHA Enterprise" (a separate paid product) has been replaced by three tiers — **Essentials**, **Premium**, and **Enterprise** — that all sit on top of the same reCAPTCHA API and the same Google Cloud console. Because "reCAPTCHA Enterprise" now refers specifically to the top, sales-negotiated tier, this document uses **"reCAPTCHA (Sept 2026)"** to mean *the current, Google Cloud–managed reCAPTCHA product as a whole* — distinct from the old "reCAPTCHA Classic" your applications use today, and distinct from the specific "Enterprise" pricing tier discussed in the Costs section. Section 1 explains this in full, with a terminology reconciliation table.
 
@@ -77,7 +80,7 @@ Migrating gives the team materially better visibility into fraud and bot traffic
 
 1. **Unified Google Cloud governance.** Keys live inside your existing GCP organization instead of a separate reCAPTCHA-specific admin console with its own ownership model. This lets you apply the same IAM, audit logging, and org-policy tooling your team already uses for every other GCP resource.
 2. **Richer score explainability.** Classic v3 gives you a single float score (0.0–1.0). Migrated keys on Premium/Enterprise expose more granular bot-defense levels (11 levels vs. 4 on Essentials) and — on Premium and above — basic-to-advanced *reason codes* explaining *why* a score was low (e.g., automation framework detected, suspicious IP reputation, low interaction entropy). This materially improves your team's ability to tune the 0.5 threshold you use today.
-3. **Native platform logging, audit logging, and dashboards.** Every `CreateAssessment` call can be logged to Cloud Logging and exported to BigQuery/Looker Studio, giving you cost, volume, and score-distribution dashboards without hand-rolled instrumentation in your backend.
+3. **Native platform logging, audit logging, and dashboards.** Every `CreateAssessment` call can be logged to Cloud Logging and exported to BigQuery/Looker Studio, giving you cost, volume, and score-distribution dashboards without hand-rolled instrumentation in your Node.js backend.
 4. **IAM-based access control and service accounts**, replacing informal "site key owner" access in the old admin console — a meaningful win for a 15-app estate maintained by one team, and for satisfying internal security/audit requirements.
 5. **Optionality for stronger protection later**, without further frontend migration: Account Defender (account takeover detection), Password Leak/Compromised Credential checks, and Transaction/Fraud Prevention signals for payment flows are all available on the same key once you opt in on the backend — useful if login or checkout flows are ever added to these applications.
 6. **No required frontend rewrite.** Google explicitly guarantees existing site-key integrations continue to work unchanged after migration; `grecaptcha.execute()`/`grecaptcha.enterprise.execute()` behavior for score-based keys is preserved.
@@ -99,12 +102,12 @@ Migrating gives the team materially better visibility into fraud and bot traffic
 
 ### 3.1 Executive Summary
 
-There are real operational items to plan for: billing must be enabled per project to stay above the free tier without service interruption; the free allowance is now shared across the *whole organization* rather than per app, so a traffic spike in one app can eat into another's headroom; the on-prem backend needs a new authentication path to Google Cloud (no more built-in service account by default, since it isn't running on GCP); and the team must decide on a project/key topology (Section 5–7) before doing any migration, because that decision is expensive to change later (keys can be moved between projects, but IAM, billing labels, and dashboards are all scoped to it).
+The migration itself is low-risk and fast (5–10 minutes per key, no code changes), but there are real operational items to plan for: billing must be enabled per project to stay above the free tier without service interruption; the free allowance is now shared across the *whole organization* rather than per app, so a traffic spike in one app can eat into another's headroom; the on-prem backend needs a new authentication path to Google Cloud (no more built-in service account by default, since it isn't running on GCP); and the team must decide on a project/key topology (Section 5–7) before doing any migration, because that decision is expensive to change later (keys can be moved between projects, but IAM, billing labels, and dashboards are all scoped to it).
 
 ### 3.2 Detailed Discussion
 
 1. **Free-tier pooling changes the mental model.** Today, most teams assume "my app is fine because it's under some free ceiling." Under the new billing model, the 10,000/month free assessments are **pooled at the organization level**, aggregating every key, site, and app under that Cloud Billing organization. With 15 apps, it takes very little traffic per app to blow past this collectively — billing must be enabled deliberately, in advance, on every project that will run production or meaningfully-trafficked non-production traffic, or requests will start returning `RESOURCE_EXHAUSTED (429)` errors with no fallback.
-2. **On-premises backend authentication is not automatic.** Google Cloud workloads get an attached service account "for free." Your backend runs **on-prem**, so it has no ambient Google credential. You must explicitly choose and implement one of: (a) a downloaded service-account JSON key (simplest, but a long-lived secret to protect and rotate), or (b) **Workload Identity Federation** (recommended — short-lived, no static key material, but requires more setup with your on-prem identity provider). This is a genuine new piece of infrastructure work, not a config toggle.
+2. **On-premises backend authentication is not automatic.** Google Cloud workloads get an attached service account "for free." Your Node.js backend runs **on-prem**, so it has no ambient Google credential. You must explicitly choose and implement one of: (a) a downloaded service-account JSON key (simplest, but a long-lived secret to protect and rotate), or (b) **Workload Identity Federation** (recommended — short-lived, no static key material, but requires more setup with your on-prem identity provider). This is a genuine new piece of infrastructure work, not a config toggle.
 3. **Migration is per-key and mostly manual.** There is no "migrate all 15 apps at once" bulk button in the console UI (though the REST/`gcloud` API can be scripted). Each of the 15 site keys must be migrated individually, and someone with the right reCAPTCHA Admin Console ownership *and* the right destination-project IAM role must perform it.
 4. **Score/threshold behavior may shift slightly.** Migrated keys benefit from Google's broader risk models (more score granularity, refreshed detection signals). Google states existing integrations "continue to work without code changes," but your `> 0.5` threshold logic should be re-validated against real traffic post-migration rather than assumed unchanged, since the underlying model is not frozen.
 5. **Downgrade risk.** If a billing issue causes a project to fall back to Essentials, you lose access to Premium/Enterprise-only features (basic reason codes, Policy Engine, etc.) and could hit the hard 10k org-wide ceiling with a 429 error and no automatic recovery until next month. This needs a monitoring/alerting story (Section 7), not just a one-time setup.
@@ -347,6 +350,83 @@ tier: premium           # optional: track which billing tier a key is on
 - Work with platform logs — <https://docs.cloud.google.com/recaptcha/docs/platform-logging>
 - Create dashboards with Looker Studio — <https://docs.cloud.google.com/recaptcha/docs/looker>
 - Access control with IAM (viewer role, `monitoring.timeSeries.list`) — <https://docs.cloud.google.com/recaptcha/docs/access-control>
+
+---
+
+### 7.5 Detailed Reports and Alerts: Per Environment and Per App
+
+This subsection expands on 7.1–7.4 with a full walkthrough of how reporting and alerting layer onto the three-project topology from Section 5 (`recaptcha-dev`, `recaptcha-uat`, `recaptcha-prod`, each holding one key per app carrying `app` / `env` / `team` labels), split explicitly by what is naturally **per-environment** (project-level) versus what requires the app label to break down **per app within an environment**.
+
+#### The core mechanism: labels flow everywhere
+
+Every signal below — billing, quota metrics, logs — carries the `app` / `env` / `team` labels set on each key. That is what makes "per app within an environment" possible without 45 separate projects: the project boundary gives you environment-level isolation, and labels give you app-level breakdown *within* that boundary.
+
+#### Reports
+
+**Per-environment (project-level, zero setup):**
+
+- **Cloud Billing reports** in the console, scoped to the `recaptcha-dev` / `uat` / `prod` project — cost trend, no configuration needed.
+  Docs: <https://docs.cloud.google.com/billing/docs/how-to/reports>
+- **reCAPTCHA's own usage dashboard** in the Cloud Console — assessment volume per key over the last 30 days.
+  Docs: <https://docs.cloud.google.com/recaptcha/docs/monitor-keys>
+
+**Per-app within an environment (requires labels + export):**
+
+1. Enable **Cloud Billing data export to BigQuery** for the billing account covering all three projects.
+   Docs: <https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery>
+2. Query/group by the `app` label in BigQuery — this gives you cost per app per environment, something the console UI alone can't slice.
+3. Enable **reCAPTCHA platform logs** per key and sink them to BigQuery (standard Cloud Logging → BigQuery export).
+   Docs: <https://docs.cloud.google.com/recaptcha/docs/platform-logging>
+4. Import Google's **Looker Studio dashboard template**, pointed at that BigQuery dataset, with a filter control on the `app` label — this is what gives you score distribution and success/failure ratio per app, not just per project.
+   Docs: <https://docs.cloud.google.com/recaptcha/docs/looker>
+
+Practically: build one Looker Studio report per environment (matching the project boundary), with an `app` dropdown filter inside each — rather than 45 separate dashboards.
+
+#### Alerts
+
+Two distinct alert types, on different signals, both scoped the same way (project = environment, label = app):
+
+**1. Cost alerts — Cloud Billing budgets**
+
+- One budget per environment project (`recaptcha-dev`, `uat`, `prod`), each with its own threshold and notification channel — this is inherently per-environment, since Cloud Billing budgets scope to a project (or billing account), not to a label.
+- For **per-app** cost alerting, budgets alone can't filter by label — instead, schedule a query against your BigQuery billing export grouped by `app`, and route the result through a Cloud Monitoring alerting policy or a scheduled function/notification (see below).
+  Docs: <https://docs.cloud.google.com/billing/docs/how-to/budgets>
+
+**2. Volume / quota / error-rate alerts — Cloud Monitoring alerting policies**
+
+- reCAPTCHA assessment metrics are exposed to Cloud Monitoring and can be filtered by resource labels (including your `app` label), so **one alerting policy per environment project can still fire per-app**, as long as the policy's condition groups/filters by the `app` label rather than aggregating the whole project.
+  Docs: <https://docs.cloud.google.com/monitoring/alerts>
+- For anything derived from the *content* of platform logs (e.g., a spike in `INVALID_TOKEN` or a specific `riskAnalysis.reasons` code for one app), create a **log-based metric** filtered on that log field, then attach an alerting policy to it. Log-based metrics inherit whatever labels you extracted from the log entry, so this is the most flexible route for genuinely per-app alerting.
+  Docs: <https://docs.cloud.google.com/logging/docs/logs-based-metrics>
+- Wire policies to **notification channels** (email, Slack, PagerDuty, Pub/Sub, webhook) — the same channel types work whether the policy is environment-wide or app-scoped.
+  Docs: <https://docs.cloud.google.com/monitoring/support/notification-options>
+- The quota-specific case from Sections 3 and 7.2 — approaching the org-wide 10,000/month free-tier ceiling — is best watched with an alerting policy on the assessment-volume metric, aggregated at whichever level matters most: environment-wide, since the ceiling itself is org-wide; or per-app, if you want early warning on which app is driving the trend.
+
+#### Putting it together
+
+| Layer | Per-environment | Per-app-in-environment |
+|---|---|---|
+| Cost report | Billing console (project-scoped) | BigQuery billing export grouped by `app` label |
+| Cost alert | Budget per project | Scheduled BigQuery query + Monitoring policy |
+| Volume report | reCAPTCHA console dashboard | Looker Studio + `app` filter |
+| Volume/quota alert | Monitoring policy on project metric | Monitoring policy filtered/grouped by `app` label |
+| Score/error-rate report | Looker Studio (project dataset) | Same dashboard, `app` filter |
+| Score/error-rate alert | Log-based metric + policy (project-wide filter) | Log-based metric + policy (label-filtered) |
+
+The one-time setup cost is the BigQuery export, the Looker Studio template, and a handful of alerting policies **per environment project** (three times total, not fifteen times per app) — app-level granularity comes from filtering/grouping by label within that shared setup, not from duplicating infrastructure per app.
+
+#### Sources
+
+- Billing reports and cost trends — <https://docs.cloud.google.com/billing/docs/how-to/reports>
+- Monitor reCAPTCHA keys — <https://docs.cloud.google.com/recaptcha/docs/monitor-keys>
+- Cloud Billing data export to BigQuery — <https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery>
+- Work with platform logs — <https://docs.cloud.google.com/recaptcha/docs/platform-logging>
+- Create dashboards with Looker Studio — <https://docs.cloud.google.com/recaptcha/docs/looker>
+- Cloud Billing budgets and alerts — <https://docs.cloud.google.com/billing/docs/how-to/budgets>
+- Cloud Monitoring alerting overview — <https://docs.cloud.google.com/monitoring/alerts>
+- Log-based metrics overview — <https://docs.cloud.google.com/logging/docs/logs-based-metrics>
+- Create and manage notification channels — <https://docs.cloud.google.com/monitoring/support/notification-options>
+- Usage reporting using labels — <https://docs.cloud.google.com/recaptcha/docs/labels>
 
 ---
 
