@@ -247,22 +247,22 @@ This gives you:
 
 ### 6.1 Executive Summary
 
-reCAPTCHA (Sept 2026) ships three predefined IAM roles — Admin, Agent, and Viewer — that map cleanly onto "who configures keys," "what calls the assessment API," and "who can look at dashboards without touching config." Because your backend runs on-prem, the service account your Node.js service uses is not automatically available the way it would be on Cloud Run/GKE; you must explicitly provision either a downloaded service-account key or, preferably, Workload Identity Federation.
+reCAPTCHA (Sept 2026) ships three predefined IAM roles — Admin, Agent, and Viewer — that map cleanly onto "who configures keys," "what calls the assessment API," and "who can look at dashboards without touching config." Because your backend runs on-prem, the service account your Node.js service uses is not automatically available the way it would be on Cloud Run/GKE; you must explicitly provision either a downloaded service-account key or, preferably, Workload Identity Federation. **Current plan: launch with a service-account JSON key per environment (Section 6.4), and pick up Workload Identity Federation afterward as tracked follow-up work rather than a migration blocker** — this is explicitly supported by Google's own documented options and does not affect or delay any other part of this migration.
 
 ### 6.2 Detailed Discussion
 
 **Predefined roles:**
 
 - **Admin** — role id `roles/recaptchaenterprise.admin`. Create/modify/delete keys, manage firewall/challenge policies, view metrics. Typical holder: a small group of senior engineers/platform team per environment (especially prod).
-- **Agent** — role id `roles/recaptchaenterprise.agent`. Create and annotate assessments (i.e., call the verification API). Typical holder: the backend service account(s) used by your Node.js services.
+- **Agent** — role id `roles/recaptchaenterprise.agent`. Create and annotate assessments (i.e., call the verification API). Typical holder: the single shared backend service's service account for that environment (see below — this is not "one per app").
 - **Viewer** — role id `roles/recaptchaenterprise.viewer`. Read-only: view keys, policies, and metrics. Typical holder: broader engineering team, support/on-call staff, dashboard-only users.
 
 Custom roles are also supported if you need something between these (e.g., regulatory requirement for a narrower permission set).
 
-**Service account model for your topology.** Following the three-project layout from Section 5, a clean pattern is:
+**Service account model for your topology.** Your architecture is **one shared backend service that all 15 frontend applications send their reCAPTCHA tokens to** — the same shape you have today with classic v3's `siteverify` call, just pointed at `createAssessment` instead. Following the three-project layout from Section 5, a clean pattern is:
 
 - One dedicated service account per environment, named e.g. `recaptcha-agent`, created inside the corresponding `recaptcha-prod` / `recaptcha-uat` / `recaptcha-dev` project, and granted `roles/recaptchaenterprise.agent` on that project only.
-- All 15 apps' backends in that environment use the *same* environment-scoped service account to call `createAssessment` — you don't need one service account per app unless you want per-app audit trails (Cloud Audit Logs already record the calling principal + the specific key/project regardless).
+- **The one shared backend service deployed for that environment** uses this single service account to call `createAssessment` for every request it handles, regardless of which of the 15 apps the request originated from. There is only ever one backend process (per environment) and one service account (per environment) — not 15 of either. The backend distinguishes *which app* a given request belongs to using an `appId` value carried in the request itself (see Section 9.2 and the companion `recaptcha-backend` reference project's `verifyRecaptchaToken({ token, expectedAction, appId })`), which it uses to look up the correct site key to validate that token against — this is a request-routing detail internal to the one backend process, not a reason to run separate backend instances or separate service accounts per app.
 - `roles/recaptchaenterprise.admin` is **not** given to this service account — key/policy management stays a human, admin-console/Terraform-driven action, following least privilege.
 
 **On-prem authentication — the key architectural decision.** Because your backend is on-prem (not GKE/Cloud Run/GCE), there is no Application Default Credentials metadata server to lean on. Google documents two supported approaches for non-GCP environments:
@@ -270,21 +270,30 @@ Custom roles are also supported if you need something between these (e.g., regul
 1. **Service account JSON key file.** Simplest to implement — set the environment variable `GOOGLE_APPLICATION_CREDENTIALS` to the path of the downloaded key file — but it's a long-lived static secret: it must be stored in your existing on-prem secrets manager, rotated periodically, and excluded from source control/images. This is the higher-risk, lower-effort option.
 2. **Workload Identity Federation (WIF) — recommended.** Lets your on-prem identity provider (e.g., an existing SAML/OIDC IdP, or a self-hosted OIDC token issuer) exchange a short-lived token for temporary Google credentials, with **no long-lived Google key material stored on-prem at all**. This is more setup work up front (configuring a workload identity pool and provider per project) but eliminates a class of credential-leak risk and is Google's current recommended pattern for hybrid/on-prem workloads calling Google Cloud APIs.
 
-Given you have 15 apps behind presumably a smaller number of shared backend services, WIF is worth the one-time setup investment rather than distributing 15 sets of static JSON keys across on-prem infrastructure.
+Because there is only one backend process per environment to configure (not 15), the one-time WIF setup cost is small relative to the benefit — there is no per-app multiplication of credential-management work either way. **For the current phase of this migration, the team has decided to launch on the service-account-key option and defer WIF as tracked follow-up work (see Section 6.4)** — this is a deliberate, revisitable choice, not a permanent architectural decision, and is worth revisiting sooner if key rotation proves operationally painful or an audit/compliance review flags the standing static credential.
 
 **API keys as a fallback.** Google also supports plain API keys as an authentication method for the assessment-creation REST call from non-GCP environments. This avoids service-account plumbing entirely but is the weakest option from a security standpoint (a bearer credential with no attached identity/audit principal) and should be restricted (HTTP referrer / IP allow-listing on the API key) if used at all. Recommended only as a stopgap before WIF is in place, not as the end state.
 
-### 6.3 Implementation Steps
+### 6.3 Implementation Steps: IAM Roles and Service Accounts
 
 1. Create one `recaptcha-agent` service account per environment project (`dev`, `uat`, `prod`).
 2. Grant `roles/recaptchaenterprise.agent` to each service account, scoped to its own project only.
 3. Grant `roles/recaptchaenterprise.admin` to a named, small group (e.g., a Google Group mapped to your platform/security engineers) per project — narrower in prod than in dev/uat.
 4. Grant `roles/recaptchaenterprise.viewer` broadly to the engineering team for dashboard/metric visibility without config rights.
-5. Stand up Workload Identity Federation from your on-prem IdP to each of the three projects; issue short-lived credentials to the Node.js backend at runtime instead of a static key file.
-6. If WIF cannot be delivered before the migration deadline, use a service-account JSON key as an interim step, stored in your existing on-prem secret manager with a documented rotation schedule, and track WIF as immediate follow-up work.
-7. Confirm Cloud Audit Logs capture `createAssessment` calls with the correct calling identity for each environment (validates the IAM setup end-to-end).
 
-### 6.4 Sources
+### 6.4 Implementation Steps: Authentication (Service Account Key Now, WIF as Tracked Follow-Up)
+
+These steps cover *how* the `recaptcha-agent` service account created in 6.3 is actually used to authenticate the on-prem backend to Google Cloud. **Current decision: launch on a service-account JSON key, and treat Workload Identity Federation as tracked follow-up work rather than a migration blocker.** This is the documented interim path from Section 6.2, not a deviation from it — nothing else in this migration (key migration in Section 4, project topology in Section 5, IAM roles in 6.3, monitoring in Section 7, frontend in Section 8, or the rest of backend implementation in Section 9) depends on which authentication mechanism is used here, so this choice can be revisited independently and later without reworking anything else.
+
+1. Generate a JSON key for each environment's `recaptcha-agent` service account (`dev`, `uat`, `prod`).
+2. Store each key in your existing on-prem secrets manager — never in source control, container images, or plain configuration files.
+3. Point `GOOGLE_APPLICATION_CREDENTIALS` at the stored key for the corresponding environment's backend deployment; no application code changes are required (see the companion `recaptcha-backend` reference project — the client library resolves either credential type transparently).
+4. Document a key rotation schedule (e.g., every 90 days) and assign ownership for actually carrying it out — this is the main ongoing cost of deferring WIF, and the part most likely to be forgotten if not explicitly assigned.
+5. Confirm Cloud Audit Logs capture `createAssessment` calls with the correct calling identity for each environment (validates the IAM setup in 6.3 and this authentication mechanism, end to end).
+6. Log Workload Identity Federation as a tracked follow-up item (backlog ticket, not just a verbal intention), scoped per environment, so the transition away from static keys has an owner and does not silently become permanent. Revisit sooner if key rotation proves operationally painful, or if an audit/compliance review flags the standing static credential.
+7. When ready to adopt WIF: stand it up from your on-prem IdP to each of the three projects, issue short-lived credentials to the Node.js backend at runtime, and retire the corresponding service-account key (delete it via `gcloud iam service-accounts keys delete`, don't just stop using it) once the swap is verified in each environment.
+
+### 6.5 Sources
 
 - Access control with IAM (roles and permissions table) — <https://docs.cloud.google.com/recaptcha/docs/access-control>
 - Create assessments for websites (authentication method table by environment) — <https://docs.cloud.google.com/recaptcha/docs/create-assessment-website>
@@ -575,21 +584,21 @@ Notes on this compared to your current code:
 - `riskAnalysis.reasons` (Premium/Enterprise tiers) gives human-readable reason codes (e.g., `AUTOMATION`, `UNEXPECTED_ENVIRONMENT`) that are valuable for logging/observability even if you keep the same `> 0.5` pass/fail cutoff.
 - Your `> 0.5` threshold logic can stay as-is initially; re-validate it (Section 4.3, step 6) rather than assume it transfers perfectly, since risk models evolve.
 
-**On-prem authentication, concretely.** Since the backend is not running on Google Cloud infrastructure, `RecaptchaEnterpriseServiceClient()` needs an explicit credential source:
+**On-prem authentication, concretely.** Since the backend is not running on Google Cloud infrastructure, `RecaptchaEnterpriseServiceClient()` needs an explicit credential source. As established in Section 6, there is **one backend service per environment**, so this credential is configured once per environment, not once per app. **Per the current plan (Section 6.4), launch with the service-account-key option below and track the move to WIF separately:**
 
 - **Simplest (interim):** point the `GOOGLE_APPLICATION_CREDENTIALS` environment variable at a securely-stored key file, with the JSON key issued to the `recaptcha-agent` service account from Section 6, stored in your existing on-prem secrets manager (e.g., Vault, or whatever the team already uses) and injected at process start — never baked into an image or committed to source control.
-- **Recommended (target state): Workload Identity Federation.** The client library supports loading an *external account credential configuration* (a small JSON pointing at your on-prem OIDC/SAML token source) instead of a static key, via the same `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing at a WIF config file rather than a service-account key. This removes the long-lived-secret problem entirely; the extra setup is a one-time cost shared across all 15 apps if the backend is a shared service, or replicated per backend deployment unit if not.
+- **Recommended (target state): Workload Identity Federation.** The client library supports loading an *external account credential configuration* (a small JSON pointing at your on-prem OIDC/SAML token source) instead of a static key, via the same `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing at a WIF config file rather than a service-account key. This removes the long-lived-secret problem entirely; because it is configured on the one shared backend process per environment rather than per app, it is a one-time setup cost per environment (three times total), not something that scales with the number of apps.
 - **API-key based REST calls** remain possible for teams that don't want to adopt the client library or WIF immediately, but this is the least secure option (Section 6.2) and is not recommended as a long-term pattern for a security-relevant control like fraud scoring.
 
-**Backend code structure recommendation.** Given 15 apps sharing this pattern, centralize the `verifyToken`-style function into a small shared internal package (or a shared verification microservice, if your backend architecture already leans that way) so the auth/credential/threshold logic lives in one place rather than being copy-pasted 15 times — this also makes future threshold or reason-code-handling changes a one-place edit instead of a 15-app rollout.
+**Backend code structure — one service, keyed by `appId`.** Your architecture already centralizes verification into one backend, matching today's shared `siteverify`-calling service. Preserve that shape: implement a single `verifyRecaptchaToken({ token, expectedAction, appId })`-style function (see the companion `recaptcha-backend` reference project) that every one of the 15 apps' requests flows through. The `appId` parameter is what lets this one function look up the correct site key per request (see `config.siteKeysByApp` in the reference project) — it is a lookup key inside a single shared function, not a signal to run separate backend instances or separate credentials per app. This keeps the auth/credential/threshold logic in exactly one place, so a future threshold or reason-code-handling change is a one-place edit rather than a rollout across multiple services.
 
 ### 9.3 Implementation Steps
 
-1. Add `@google-cloud/recaptcha-enterprise` to the shared backend dependency set (or the relevant service if verification logic is centralized).
-2. Implement credential resolution per Section 6 (service-account key as interim, WIF as target) and confirm `RecaptchaEnterpriseServiceClient()` picks it up correctly in a non-GCP process.
-3. Replace the `siteverify` HTTP call with `createAssessment`, including `expectedAction` validation and structured logging of `riskAnalysis.reasons`.
+1. Add `@google-cloud/recaptcha-enterprise` to your existing shared backend service's dependencies — no new service is being introduced.
+2. Implement credential resolution per Section 6 (service-account key as interim, WIF as target) **once, for this one backend service, per environment** — three credential setups total (dev/uat/prod), not fifteen.
+3. Replace the `siteverify` HTTP call with `createAssessment` inside your existing shared verification function, including `expectedAction` validation and structured logging of `riskAnalysis.reasons`.
 4. Keep the existing `> 0.5` pass/fail decision initially; add a metric/log line capturing score distribution so the threshold can be re-tuned with real post-migration data.
-5. Centralize this logic in one shared module/service consumed by all 15 apps' backends rather than duplicating per app.
+5. Add an `appId` parameter (or equivalent, e.g. inferred from the caller's existing app-identifying request header) to the shared verification function so it can resolve which of the 15 site keys a given request should be checked against — this is the mechanism that lets one backend safely serve all 15 apps rather than trusting a single global site key.
 6. Add error handling for `RESOURCE_EXHAUSTED` (429, quota/free-tier exceeded) distinct from `INVALID_ARGUMENT`/token-invalid errors, since these require different operational responses (Section 7).
 7. Load-test the new authenticated call path (added network hop + Google auth token exchange) to confirm latency is acceptable for your request budgets, especially the first request after a credential/token refresh.
 
@@ -779,7 +788,7 @@ This removes the third-party dependency entirely, uses the officially documented
 
 1. **"Migrating to reCAPTCHA Enterprise" = migrating to the Premium tier of reCAPTCHA (Sept 2026)** for the primary cost/architecture narrative, with true contract-based Enterprise treated as a secondary, future option — confirmed as the intended framing with you before drafting.
 2. **Cost scenarios (10k/20k/50k/100k) are per individual Angular application**, per your explicit confirmation, and are additionally presented on an organization-wide pooled basis because that is how billing actually applies — both views are included so neither number is read in isolation and misapplied to a budget request.
-3. **The Node.js backend authentication section assumes a fully on-premises deployment** with no existing Google Cloud workload identity, and recommends Workload Identity Federation as the target state; if any part of the backend already runs on GCP infrastructure (e.g., a hybrid setup), some of this section's effort estimate would be lower.
+3. **The Node.js backend authentication section assumes a fully on-premises deployment** with no existing Google Cloud workload identity, and describes Workload Identity Federation as the eventual target state; if any part of the backend already runs on GCP infrastructure (e.g., a hybrid setup), some of this section's effort estimate would be lower. **As of the latest revision, the team has confirmed the near-term plan is to launch on a service-account JSON key (Section 6.4) and pick up WIF afterward as tracked follow-up work** — reflected in Sections 6.1, 6.2, and 6.4; this is a deliberate, revisitable choice rather than a gap in the analysis.
 4. **The 3-project (dev/uat/prod) topology in Section 5 is a recommendation, not a description of an existing decision** — it directly answers your open question about the best cost/usage-monitoring structure, but should be validated against any existing GCP project-naming/governance conventions elsewhere in the company before being finalized.
 5. **The EUR figures in Section 10.5 use an indicative exchange rate** or approximately 1 USD ≈ 0.87 EUR as of mid-2026 market data, not a live rate — treat these as directional only and re-check before any formal budget submission.
 6. **ng-recaptcha-2 compatibility is assessed based on its public GitHub description and the official Google migration guarantees**, not by directly testing it against a live migrated key — a short technical spike validating this in your pilot migration (Section 4.3, step 5) is recommended before treating it as fully confirmed.
