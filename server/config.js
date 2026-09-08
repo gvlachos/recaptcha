@@ -90,13 +90,37 @@ function optionalNumberEnv(name, defaultValue, { min, max } = {}) {
 }
 
 /**
- * Builds the { RECAPTCHA_SITE_KEY_APP01: '...', ... } style
- * per-application site key map into a plain lookup object, e.g.
- *   { APP01: '6Lc-...', APP02: '6Lc-...' }
+ * Converts a canonical, label-style application identifier (e.g.
+ * "app-01" — the SAME value used as the `app` label on the
+ * reCAPTCHA key itself; see the migration guide, Sections 5 and 7)
+ * into the environment-variable-safe suffix used to look up that
+ * app's site key (e.g. "APP_01", matching
+ * RECAPTCHA_SITE_KEY_APP_01).
+ *
+ * This exists so every caller — the frontend, this config module,
+ * and any other internal caller — can use ONE identifier spelling
+ * ("app-01") without needing to know or reproduce the
+ * environment-variable-safe spelling themselves. Normalization
+ * happens in exactly this one place.
+ */
+function normalizeAppIdToEnvSuffix(appId) {
+  return String(appId).trim().toUpperCase().replace(/-/g, '_');
+}
+
+/**
+ * Builds the { RECAPTCHA_SITE_KEY_APP_01: '...', ... } style
+ * per-application site key map into a plain lookup object, keyed by
+ * the RAW environment-variable suffix as it appears in the
+ * variable name, e.g. { APP_01: '6Lc-...', APP_02: '6Lc-...' }.
+ *
+ * Callers should NOT read this map directly with an unnormalized
+ * appId (e.g. "app-01") — use `getSiteKeyForApp(appId)` below,
+ * which applies `normalizeAppIdToEnvSuffix()` first. This map is
+ * exported mainly for diagnostics/testing.
  *
  * This lets one backend instance safely serve multiple frontend
  * applications while still validating that a token presented for
- * "app01" was actually minted with app01's site key (defense
+ * "app-01" was actually minted with app-01's site key (defense
  * against a token being replayed against the wrong app's endpoint
  * — see src/recaptchaVerification.js).
  *
@@ -110,8 +134,8 @@ function buildSiteKeyMap() {
   const map = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (key.startsWith(prefix) && value && value.trim() !== '') {
-      const appId = key.slice(prefix.length); // e.g. "APP01"
-      map[appId] = value.trim();
+      const envSuffix = key.slice(prefix.length); // e.g. "APP_01"
+      map[envSuffix] = value.trim();
     }
   }
   return map;
@@ -158,9 +182,24 @@ const config = Object.freeze({
 if (!config.defaultSiteKey && Object.keys(config.siteKeysByApp).length === 0) {
   throw new Error(
     '[config] No site key configured. Set either RECAPTCHA_SITE_KEY (single-app ' +
-      'deployments) or one or more RECAPTCHA_SITE_KEY_<APPID> variables ' +
+      'deployments) or one or more RECAPTCHA_SITE_KEY_<APP_ID> variables ' +
       '(multi-app deployments). See .env.example section 3.'
   );
 }
 
-module.exports = { config, requireEnv, optionalEnv, optionalNumberEnv };
+/**
+ * Resolves the site key for a given canonical appId (e.g.
+ * "app-01"), normalizing it to the environment-variable-safe form
+ * first. This is the function callers (e.g.
+ * recaptchaVerification.js) should use — never read
+ * `config.siteKeysByApp` directly with a raw, unnormalized appId.
+ *
+ * @param {string} appId Canonical, label-style app identifier (e.g. "app-01").
+ * @returns {string|undefined} The configured site key, or undefined if none is set for this appId.
+ */
+function getSiteKeyForApp(appId) {
+  if (!appId) return undefined;
+  return config.siteKeysByApp[normalizeAppIdToEnvSuffix(appId)];
+}
+
+module.exports = { config, getSiteKeyForApp, normalizeAppIdToEnvSuffix, requireEnv, optionalEnv, optionalNumberEnv };

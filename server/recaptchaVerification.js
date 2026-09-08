@@ -42,7 +42,7 @@
 'use strict';
 
 const { client } = require('./recaptchaClient');
-const { config } = require('./config');
+const { config, getSiteKeyForApp } = require('./config');
 
 /**
  * Error subclass used for all verification-time failures so that
@@ -84,11 +84,16 @@ class RecaptchaVerificationError extends Error {
  * @param {string} [params.appId]
  *   Which application's site key to validate the token against,
  *   used only when this backend instance serves multiple frontend
- *   applications and `config.siteKeysByApp` is populated (see
- *   config.js and .env.example section 3). Must match one of the
- *   `RECAPTCHA_SITE_KEY_<APPID>` suffixes you configured. If this
- *   backend instance serves a single application, omit this
- *   parameter and `config.defaultSiteKey` is used instead.
+ *   applications and one or more `RECAPTCHA_SITE_KEY_<APP_ID>`
+ *   variables are configured (see config.js and .env.example
+ *   section 3). Use the same canonical, label-style identifier as
+ *   the `app` label on that application's reCAPTCHA key (e.g.
+ *   "app-01" — see the migration guide, Sections 5 and 7) — NOT the
+ *   key's display name, and not the environment-variable-safe
+ *   spelling ("APP_01"); normalization between the two happens
+ *   internally via `getSiteKeyForApp()`. If this backend instance
+ *   serves a single application, omit this parameter and
+ *   `config.defaultSiteKey` is used instead.
  *
  * @returns {Promise<{
  *   success: boolean,
@@ -169,7 +174,10 @@ async function verifyRecaptchaToken({ token, expectedAction, appId }) {
   }
 
   // --- 2. Resolve which site key this token should be checked against ---
-  const expectedSiteKey = appId ? config.siteKeysByApp[appId] : config.defaultSiteKey;
+  // `appId`, if provided, is expected in its canonical label-style
+  // form (e.g. "app-01") — `getSiteKeyForApp()` normalizes it to the
+  // environment-variable-safe form internally (see config.js).
+  const expectedSiteKey = appId ? getSiteKeyForApp(appId) : config.defaultSiteKey;
 
   if (!expectedSiteKey) {
     // Configuration problem, not a user-caused failure — surfaced
@@ -177,7 +185,9 @@ async function verifyRecaptchaToken({ token, expectedAction, appId }) {
     throw new Error(
       appId
         ? `[recaptchaVerification] No site key configured for appId "${appId}". ` +
-          'Check RECAPTCHA_SITE_KEY_<APPID> in your environment configuration.'
+          'Check that a matching RECAPTCHA_SITE_KEY_<APP_ID> variable is set — ' +
+          `e.g. for appId "${appId}" that would be ` +
+          `RECAPTCHA_SITE_KEY_${appId.toUpperCase().replace(/-/g, '_')}. See .env.example section 3.`
         : '[recaptchaVerification] No default site key configured. ' +
           'Check RECAPTCHA_SITE_KEY in your environment configuration.'
     );
