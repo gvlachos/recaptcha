@@ -201,6 +201,14 @@ the corresponding `appId` into `verifyRecaptchaToken()` per request (see
 key cannot be replayed against a different application sharing the same
 backend.
 
+**Naming convention.** `appId` should always be the same canonical,
+label-style identifier used as the `app` label on that application's
+reCAPTCHA key (e.g. `app-01` — see the migration guide, Sections 5 and 7),
+never the key's display name (e.g. `app-01-web`). `config.js` normalizes this
+into the environment-variable-safe form (`app-01` → `APP_01`) internally via
+`getSiteKeyForApp()` — callers should never need to spell out
+`RECAPTCHA_SITE_KEY_APP_01` themselves.
+
 ## Further reading
 
 - Create assessments for websites (REST contract this library wraps) —
