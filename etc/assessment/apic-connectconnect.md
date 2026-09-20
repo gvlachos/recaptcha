@@ -1,6 +1,6 @@
 # IBM Api Connect and Google reCAPTCHA assessments
 
-I'll check the doc you linked so the field list is accurate.The fields in that section come from three places: the browser request, the API Connect (APIC) context, and your own configuration. Google's doc shows this request body:
+Google reCAPTCHA assessment fields:
 
 ```json
 {

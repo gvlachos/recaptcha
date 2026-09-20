@@ -292,3 +292,106 @@ Directly shelling out to `salesforce/ja3` per-request is generally impractical �
 - Deep-dive blog — "TLS Fingerprinting with JA3 and JA3S": https://engineering.salesforce.com/tls-fingerprinting-with-ja3-and-ja3s-247362855967
 - Actively maintained successor, JA4 (FoxIO): https://github.com/FoxIO-LLC/ja4
 - Go implementation (if your infra is Go-based, easier to embed than the Python pcap tool): https://pkg.go.dev/github.com/jbremer/ja3
+
+---
+
+## Part 1 — Questions to ask before choosing an implementation
+
+Group these by who in the org needs to answer them.
+
+### A. Architecture / where TLS is actually terminated
+- Where does TLS termination happen today — CDN/WAF (Cloudflare, Akamai, Fastly), cloud load balancer (AWS ALB/NLB, GCP Load Balancer, Azure App Gateway), a self-managed reverse proxy (nginx/Envoy/HAProxy), or directly on application servers?
+- Is there a **single choke point** all traffic passes through, or multiple ingress paths (direct-to-origin, partner APIs, mobile app backends, internal service mesh) that would each need their own fingerprinting?
+- Do we terminate TLS 1.3 with 0-RTT/session resumption anywhere? (Affects what's visible in a given handshake and whether JA4 needs to handle resumed sessions differently from full handshakes.)
+- Is QUIC/HTTP-3 in use or planned? (JA4 has QUIC support; JA3 does not — relevant if you're modernizing anyway.)
+
+### B. Licensing and legal (this is the one people skip and regret)
+- Will JA4 be used purely **internally** to protect our own applications, or would it ever be **resold, offered as a feature, or embedded in a product we sell**? JA4 (TLS client fingerprint) itself is open-source under BSD-3-Clause with no patent claims, so it's freely usable, but the rest of the suite — JA4S, JA4H, JA4L, JA4X, JA4SSH, JA4T, etc. — is under the FoxIO License 1.1, which is permissive for internal business and security research use but explicitly **not permissive for monetization**; a vendor wanting to sell JA4+ fingerprinting as part of a product needs an OEM license from FoxIO.
+- Does legal/procurement need to review the FoxIO License 1.1 text before rollout, given it differs from the plain BSD terms most of the org is used to?
+- If we only need the TLS client fingerprint (equivalent to what JA3 did), can we stay entirely on the BSD-3-Clause JA4 component and avoid FoxIO-License-encumbered modules altogether?
+
+### C. Security/detection goals — what exactly are we trying to catch?
+- Is the primary goal bot/scraper detection, credential-stuffing detection, malware C2 detection, DDoS/volumetric attack detection, or general fraud/risk scoring feeding something like reCAPTCHA Enterprise?
+- Do we need just `ja4` (TLS client), or also `ja4h` (HTTP header fingerprint), `ja4t`/`ja4ts` (TCP fingerprint), `ja4x` (X.509 cert fingerprint), or `ja4ssh` (SSH)? Each has different capture requirements and license terms.
+- What's the tolerance for false positives? (Chrome's 2023 extension-shuffling change was specifically designed to defeat fixed fingerprints like JA3, which is part of why JA4 exists — Google implemented a change in Chromium-based browsers to shuffle the order of TLS extensions, and FoxIO built JA4 partly in response to keep fingerprinting resilient to that.)
+- Do we need real-time, per-request blocking decisions, or is near-real-time (streamed to a SIEM within seconds) acceptable?
+
+### D. Downstream consumption
+- Where does the fingerprint need to end up — a WAF rule engine, a reCAPTCHA Enterprise assessment call, a SIEM (Splunk, Elastic, Datadog), a custom risk-scoring service?
+- Does it need to be correlated with other identifiers per-request (session ID, IP, User-Agent) and if so, what's the correlation key and acceptable latency between capture and consumption?
+- Is there an existing SIEM/threat-intel pipeline that already ingests JA3 today that this needs to interoperate with or replace?
+
+### E. Data, privacy, and compliance
+- Does legal/privacy consider a TLS/device fingerprint personal data under GDPR/CCPA given it can contribute to device tracking? Does it need a DPIA or update to the privacy policy?
+- What's the retention period for stored fingerprints, and does it align with existing log-retention policy?
+- Are there regions/business units with stricter rules on network-traffic inspection (e.g., works councils, EU data residency) that constrain where the capture/processing can happen?
+
+### F. Operations and scale
+- What's peak request volume/TPS at the termination point, and what's the acceptable added latency/CPU overhead for fingerprint computation?
+- Who owns lifecycle/patching for a new nginx module or sidecar (platform/infra team vs. security team)?
+- Is there budget/appetite for a **paid CDN/WAF feature** (many already ship JA4 as part of bot management) vs. building/operating open-source components in-house?
+- Do we already have a JA3-based pipeline in production? If so, does this need to run **in parallel** during a transition period, or can it fully replace JA3 (FoxIO explicitly designed JA4 so any company currently using JA3 can upgrade immediately, since JA4 keeps the same BSD-3-Clause terms)?
+
+---
+
+## Part 2 — Candidate implementation plans
+
+### Option A — Use a CDN/WAF that already computes JA4 natively
+**How it works:** Route traffic through a provider that computes JA4 at their edge and injects it as a request header or exposes it via API/logs. Cloudflare is a prominent example — since 2023–2024 they've built JA4 fingerprinting and "inter-request signals" directly into their Bot Management/WAF stack, developed partly in response to Chrome disrupting the JA3-based fingerprinting approach.
+
+**Pros:** Near-zero engineering effort; vendor handles TLS 1.3/QUIC/session-resumption edge cases; scales automatically; usually bundled with broader bot-management tooling (rate limiting, challenge pages) you'd otherwise have to build.
+
+**Cons:** Vendor lock-in; recurring cost; you're dependent on their header/API naming and update cadence; less control over exactly which JA4+ variants are exposed; if you're not already on that CDN, migrating is a much bigger project than "just fingerprinting."
+
+**Best fit:** Orgs already using Cloudflare/Akamai/Fastly-class edge, where enabling an existing feature is cheaper than building.
+
+---
+
+### Option B — Self-hosted nginx module at your own TLS-terminating layer
+**How it works:** Deploy FoxIO's `ja4-nginx-module` (a small core patch + module) at whichever nginx instances actually terminate TLS, and have it inject the fingerprint as a custom request header (e.g. `X-JA4`) that your application (or a downstream proxy) reads and forwards.
+
+**Pros:** Full control, no per-request vendor cost, works even if you're not on a JA4-native CDN; the module ships with Docker images/compose files for fast evaluation.
+**Cons:** Requires patching/rebuilding nginx core (operational burden — patch management on every nginx upgrade); you own scaling/HA of this component; requires the FoxIO License 1.1 review from Part 1B before production use if you plan to expose more than plain BSD-licensed JA4.
+
+**Best fit:** Orgs already self-hosting nginx as an ingress/reverse-proxy layer with in-house platform engineering capacity.
+
+---
+
+### Option C — Sidecar/out-of-band packet capture (eBPF, Zeek/Suricata, or a Go/Rust library)
+**How it works:** Run a capture agent (eBPF-based, or Zeek/Suricata which both have native JA3/JA4 support) alongside your TLS terminator, or embed a library like the `ja4plus` Python implementation or a Go/Rust JA4 library directly into your proxy/load-balancer's request pipeline, correlating captured fingerprints to specific connections by 5-tuple (src IP/port, dst IP/port, timestamp).
+
+**Pros:** Works even where you can't modify the terminator itself (e.g. managed cloud load balancers where you can't install a module); reuses existing network-security tooling (Zeek/Suricata) many enterprises already run for IDS/threat-hunting; can capture the *whole* JA4+ family (JA4T, JA4H, JA4X) in one pipeline for broader threat-hunting use cases beyond just bot detection.
+**Cons:** Highest engineering complexity of the three options — correlation logic, packet-capture permissions (root/CAP_NET_RAW or eBPF privileges), and latency between capture and consumption all need careful design; doesn't naturally give you a synchronous per-request value at the moment your app needs to make a decision (e.g., before calling reCAPTCHA), so it suits async/SIEM-style detection better than real-time blocking.
+
+**Best fit:** Security/threat-hunting teams building a broader detection platform (not just a single "inject a header" use case), or environments using managed load balancers where you can't install custom modules.
+
+---
+
+### Option D — Managed load balancer / service mesh extension
+**How it works:** If you're on AWS/Azure/GCP and using their native load balancers, check whether their WAF product has JA4 support (AWS WAF and Azure Firewall are both listed among products with JA3 support historically, and are extending toward JA4 as the successor becomes standard) rather than trying to self-host at that layer, since you often can't install custom modules on managed LBs at all.
+**Pros:** Fits cleanly if you're already all-in on one cloud's networking stack; avoids operating your own proxy fleet.
+**Cons:** Feature availability and JA4 (vs. only JA3) support varies by provider and region — needs direct verification with the cloud vendor's current docs before committing, since this changes over time.
+
+---
+
+## Suggested phased rollout (regardless of which option is chosen)
+
+1. **POC (2–4 weeks):** Stand up the chosen capture method against a *non-production* endpoint or a mirrored traffic feed; validate you're getting stable JA4 hashes for known clients (real browsers, your mobile app, known bots) and that hashes match FoxIO's published spec/test vectors.
+2. **Shadow mode in production (2–4 weeks):** Deploy at the real termination point but only log/forward the fingerprint — don't act on it yet. Correlate against existing signals (User-Agent, IP reputation, existing JA3 data if any) to sanity-check for unexpected mismatch rates.
+3. **Soft enforcement (2–4 weeks):** Feed JA4 into risk-scoring/reCAPTCHA assessment calls or WAF rules in "flag, don't block" mode; monitor false-positive rate on known-good traffic (internal QA bots, monitoring probes, legitimate automation/partners you know use non-browser TLS stacks).
+4. **Full enforcement:** Move to active blocking/challenging based on JA4 signal, with an exception/allowlist process for legitimate automated clients (internal tools, approved partner integrations) that will otherwise get flagged.
+5. **Ongoing:** Track Chrome/Firefox/Safari version rollouts for TLS-stack changes that could shift fingerprint distributions (this happened before with the 2023 extension-shuffling change), and keep an allowlist/exception process live so legitimate new client versions don't get mass-blocked.
+
+---
+
+## Links
+
+| Resource | URL |
+|---|---|
+| JA4+ main repo (spec, TLS client fingerprint, BSD-3-Clause) | https://github.com/FoxIO-LLC/ja4 |
+| JA4+ License FAQ (BSD vs. FoxIO License 1.1, OEM/monetization rules) | https://github.com/FoxIO-LLC/ja4/blob/main/License%20FAQ.md |
+| JA4 nginx module (self-hosted implementation option) | https://github.com/FoxIO-LLC/ja4-nginx-module |
+| Cloudflare — JA4 fingerprints and inter-request signals (CDN-native option, Option A) | https://blog.cloudflare.com/ja4-signals/ |
+| ja4plus — independent Python implementation of full JA4+ suite | https://pypi.org/project/ja4plus/ |
+| f5devcentral JA4 module (F5 BIG-IP integration example) | https://github.com/f5devcentral/f5-ja4 |
+| Google reCAPTCHA — where the resulting `ja3`/`ja4` value gets consumed | https://docs.cloud.google.com/recaptcha/docs/create-assessment-website#create-assessment-request |
