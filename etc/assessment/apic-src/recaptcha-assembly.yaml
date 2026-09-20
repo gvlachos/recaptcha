@@ -1,0 +1,183 @@
+# Fragment for the x-ibm-configuration section of your API (OpenAPI) definition.
+# Target gateway: DataPower API Gateway (v10 / API Connect 10.x).
+# Merge into your existing x-ibm-configuration; adjust the backend invoke and paths.
+#
+# The GatewayScript sources below are identical to:
+#   recaptcha-build-request.js
+#   recaptcha-check-assessment.js
+
+x-ibm-configuration:
+  gateway: datapower-api-gateway
+  type: rest
+  phase: realized
+
+  properties:
+    recaptcha-project-id:
+      value: my-gcp-project-id
+      description: Google Cloud project ID that owns the reCAPTCHA key
+      encoded: false
+    recaptcha-site-key:
+      value: 6Lxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      description: reCAPTCHA key ID (the same one used by the browser app)
+      encoded: false
+    recaptcha-api-key:
+      value: REPLACE_ME
+      description: Google API key restricted to the reCAPTCHA Enterprise API
+      encoded: true
+    recaptcha-min-score:
+      value: "0.5"
+      description: Minimum acceptable reCAPTCHA score (0.0 - 1.0)
+      encoded: false
+
+  assembly:
+    execute:
+      # If you have several operations, wrap the block below in an operation-switch
+      # and set a different recaptcha.expectedAction per case.
+
+      # 1. Copy properties into context variables and set the per-operation action.
+      - set-variable:
+          version: 2.0.0
+          title: recaptcha-config
+          actions:
+            - set: recaptcha.siteKey
+              value: $(recaptcha-site-key)
+            - set: recaptcha.minScore
+              value: $(recaptcha-min-score)
+            - set: recaptcha.expectedAction
+              value: login
+
+      # 2. Build the createAssessment request (token, siteKey, userAgent, IP, action).
+      - gatewayscript:
+          version: 2.0.0
+          title: recaptcha-build-request
+          source: |
+            // GatewayScript (DataPower API Gateway) - build the reCAPTCHA Enterprise
+            // projects.assessments.create request body.
+            //
+            // Expects these context variables (set by the set-variable policy before this one):
+            //   recaptcha.siteKey         - your reCAPTCHA key ID
+            //   recaptcha.expectedAction  - action name for THIS operation (e.g. "login")
+            //
+            // Produces a named message "recaptcha-request" that the invoke policy sends.
+            // The original client request (message) is left untouched.
+
+            var siteKey = context.get('recaptcha.siteKey');
+            var expectedAction = context.get('recaptcha.expectedAction');
+
+            // 1. Token: prefer a header, fall back to a JSON body field.
+            var token = context.get('request.headers.x-recaptcha-token');
+            if (!token) {
+              var reqBody = context.get('request.body');
+              if (reqBody && typeof reqBody === 'object') {
+                token = reqBody.recaptchaToken;
+              }
+            }
+
+            if (!token) {
+              context.message.statusCode = '400 Bad Request';
+              context.reject('BadRequestError', 'Missing reCAPTCHA token');
+            } else {
+              // 2. End-user IP: X-Forwarded-For may be a comma-separated list; the first
+              //    entry is the original client. Falls back to x-client-ip if present.
+              var fwd = context.get('request.headers.x-forwarded-for') ||
+                        context.get('request.headers.x-client-ip') || '';
+              var userIp = String(fwd).split(',')[0].trim();
+
+              // 3. User agent of the browser (not the gateway).
+              var userAgent = context.get('request.headers.user-agent') || '';
+
+              // 4. Assemble the event. Optional fields are omitted when empty.
+              var event = {
+                token: String(token),
+                siteKey: siteKey,
+                expectedAction: expectedAction
+              };
+              if (userIp) { event.userIpAddress = userIp; }
+              if (userAgent) { event.userAgent = String(userAgent); }
+
+              // 5. Create a separate message so the client's original body is preserved
+              //    for the backend call later in the assembly.
+              var msg = context.createMessage('recaptcha-request');
+              msg.header.set('Content-Type', 'application/json');
+              msg.body.write({ event: event });
+            }
+
+      # 3. Call Google. Sends the "recaptcha-request" message, stores the reply
+      #    in "recaptcha-response". The client's own request stays intact.
+      - invoke:
+          version: 2.1.0
+          title: recaptcha-create-assessment
+          header-control:
+            type: blocklist
+            values: []
+          parameter-control:
+            type: blocklist
+            values: []
+          timeout: 10
+          verb: POST
+          cache-response: no-cache
+          cache-ttl: 900
+          stop-on-error: []
+          target-url: >-
+            https://recaptchaenterprise.googleapis.com/v1/projects/$(recaptcha-project-id)/assessments?key=$(recaptcha-api-key)
+          input: recaptcha-request
+          output: recaptcha-response
+
+      # 4. Validate: HTTP status, token validity, action match, score threshold.
+      - gatewayscript:
+          version: 2.0.0
+          title: recaptcha-check-assessment
+          source: |
+            // GatewayScript (DataPower API Gateway) - validate the reCAPTCHA assessment.
+            //
+            // Expects:
+            //   recaptcha-response        - output message of the invoke policy
+            //   recaptcha.expectedAction  - action name for THIS operation
+            //   recaptcha.minScore        - minimum acceptable score, e.g. "0.5"
+            //
+            // Fails closed: any problem rejects the request instead of letting it through.
+            // Sets recaptcha.score for later policies (logging, risk-based decisions).
+
+            function deny(status, name, message) {
+              context.message.statusCode = status;
+              context.reject(name, message);
+            }
+
+            var httpStatus = context.get('recaptcha-response.status.code');
+            var assessment = context.get('recaptcha-response.body');
+
+            // The body may arrive already parsed or as a string.
+            if (typeof assessment === 'string') {
+              try { assessment = JSON.parse(assessment); } catch (e) { assessment = null; }
+            }
+
+            var expectedAction = context.get('recaptcha.expectedAction');
+            var minScore = parseFloat(context.get('recaptcha.minScore'));
+            if (isNaN(minScore)) { minScore = 0.5; }
+
+            if (httpStatus !== 200 || !assessment) {
+              // Google unreachable, bad API key, quota, malformed request, etc.
+              // Don't log the request body or API key here.
+              deny('503 Service Unavailable', 'ServiceUnavailableError',
+                   'reCAPTCHA verification unavailable');
+
+            } else if (!assessment.tokenProperties || assessment.tokenProperties.valid !== true) {
+              // invalidReason examples: EXPIRED, DUPLICATE, MALFORMED, MISSING, BROWSER_ERROR
+              var reason = (assessment.tokenProperties && assessment.tokenProperties.invalidReason) || 'UNKNOWN';
+              context.set('recaptcha.invalidReason', reason);
+              deny('403 Forbidden', 'ForbiddenError', 'Invalid reCAPTCHA token');
+
+            } else if (assessment.tokenProperties.action !== expectedAction) {
+              // Action mismatch: token was generated for a different action (possible forgery/replay).
+              deny('403 Forbidden', 'ForbiddenError', 'reCAPTCHA action mismatch');
+
+            } else {
+              var score = assessment.riskAnalysis && assessment.riskAnalysis.score;
+              context.set('recaptcha.score', score);
+              context.set('recaptcha.reasons', (assessment.riskAnalysis && assessment.riskAnalysis.reasons) || []);
+
+              if (typeof score !== 'number' || score < minScore) {
+                deny('403 Forbidden', 'ForbiddenError', 'reCAPTCHA score too low');
+              }
+              // else: fall through and let the assembly continue to the backend.
+            }
